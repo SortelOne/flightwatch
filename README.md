@@ -69,11 +69,21 @@ If it leaks, delete the webhook in Discord and make a new one.
 |---|---|
 | Add or remove a destination | edit `[destinations]` in `/etc/flightwatch/config.toml`; the next scan picks it up |
 | See prices so far | `flightwatch status` |
-| Run a scan right now | `systemctl start flightwatch.service` |
+| Run a scan right now | `systemctl start --no-block flightwatch.service` (without `--no-block` it waits for the whole scan) |
 | Watch the logs | `journalctl -u flightwatch -f` |
 | When's the next scan | `systemctl list-timers flightwatch.timer` |
-| Change how often it runs | edit `OnUnitActiveSec=` in `/etc/systemd/system/flightwatch.timer`, then `systemctl daemon-reload` |
+| Change how often it runs | `systemctl edit flightwatch.timer` (see below; the installer overwrites the unit file itself on every update) |
 | Update Flightwatch | `git pull && ./deploy/install.sh` (keeps your config) |
+
+To scan every 3 hours instead of 6, run `systemctl edit flightwatch.timer` and add
+this to the override it opens. The empty line clears the old interval, which
+otherwise stays as a second one:
+
+```ini
+[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=3h
+```
 
 ## The config
 
@@ -124,6 +134,10 @@ Discord warning a day while every search is failing. To fix it, update fli:
 /opt/flightwatch/venv/bin/pip install -U flights
 flightwatch scan --dry-run --only CUN
 ```
+
+If that fixes it, bump the `flights==` pin in `pyproject.toml` to the version that
+worked (`/opt/flightwatch/venv/bin/pip show flights`). Otherwise the next
+`./deploy/install.sh` puts the old, broken version back.
 
 If the service won't start in the LXC (`status=226/NAMESPACE` in the logs),
 turn on Options → Features → Nesting for the container in Proxmox, or delete the

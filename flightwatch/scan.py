@@ -52,6 +52,9 @@ def should_alert(price: float, target: float, last: SentAlert | None, now: datet
     return now - last.sent_at >= timedelta(days=realert_after_days)
 
 
+PAST_WINDOW = "travel window is in the past"
+
+
 @dataclass
 class DestinationResult:
     code: str
@@ -60,13 +63,25 @@ class DestinationResult:
     error: str | None = None
 
 
+def failures(results: list[DestinationResult]) -> tuple[list[DestinationResult], bool]:
+    """The destinations whose search failed, and whether every one that was searched failed.
+
+    Destinations skipped because their travel window is over weren't searched, so they
+    don't count either way: one expired destination mustn't hide that Google is blocking
+    all the others.
+    """
+    searched = [r for r in results if r.error != PAST_WINDOW]
+    failed = [r for r in searched if r.error]
+    return failed, bool(failed) and len(failed) == len(searched)
+
+
 def scan_destination(config: Config, store: Store, dest: Destination, *, dry_run: bool = False,
                      today: date | None = None) -> DestinationResult:
     result = DestinationResult(dest.code)
     started = utcnow()
 
     if not any(search.search_plan(dest.trip, today).values()):
-        result.error = "travel window is in the past"
+        result.error = PAST_WINDOW
         log.info("%s: skipped, its travel window is in the past", dest.code)
         return result
 
@@ -135,8 +150,8 @@ def run_scan(config: Config, store: Store, *, dry_run: bool = False, only: set[s
             log.error("%s: search failed: %s", dest.code, exc)
             results.append(DestinationResult(dest.code, error=f"{type(exc).__name__}: {exc}"))
 
-    failed = [r for r in results if r.error and r.error != "travel window is in the past"]
-    if failed and len(failed) == len(results) and config.alerts.notify_on_errors and not dry_run:
+    failed, all_failed = failures(results)
+    if all_failed and config.alerts.notify_on_errors and not dry_run:
         _maybe_warn(config, store, failed)
     elif not failed:
         store.set_meta("last_error_notice", "")

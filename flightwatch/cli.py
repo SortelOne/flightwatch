@@ -69,9 +69,14 @@ def _cmd_test_discord(config, _args) -> int:
 
 
 def _cmd_scan(config, args) -> int:
-    from .scan import ScanBusy, run_scan, scan_lock
+    from .scan import ScanBusy, failures, run_scan, scan_lock
 
     only = {c.upper() for c in args.only} if args.only else None
+    if only:
+        unknown = sorted(only - {d.code for d in config.destinations})
+        if unknown:
+            print(f"Not in [destinations]: {', '.join(unknown)}", file=sys.stderr)
+            return 2
     try:
         with scan_lock(config.database):
             store = Store(config.database)
@@ -83,11 +88,11 @@ def _cmd_scan(config, args) -> int:
     except ScanBusy:
         logging.getLogger("flightwatch").info("another scan is already running; skipping this one")
         return 0
-    errors = [r for r in results if r.error and r.error != "travel window is in the past"]
+    errors, all_failed = failures(results)
     alerts = sum(r.alerted for r in results)
     logging.getLogger("flightwatch").info("scan done: %d destinations, %d alerts, %d errors",
                                           len(results), alerts, len(errors))
-    return 1 if errors and len(errors) == len(results) else 0
+    return 1 if all_failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:

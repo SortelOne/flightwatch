@@ -71,6 +71,17 @@ def test_bad_destinations(tmp_path, bad, message):
         load_config(write(tmp_path, text))
 
 
+@pytest.mark.parametrize("before, after, message", [
+    ("NRT = { max_price = 1800,", "NRT = { max_price = 1800, nigths = [9],", "destinations.NRT: unknown setting 'nigths' .*'nights'"),
+    ("max_stops = 1\n", "max_stop = 1\n", "trip: unknown setting 'max_stop'"),
+    ('origins = ["ord", "MDW"]', 'origin = ["ORD"]\norigins = ["ORD"]', "config: unknown setting 'origin'"),
+    ("[destinations]", "[scanner]\npaused = \"yes\"\n[destinations]", "scanner.paused"),
+])
+def test_typos_are_errors_not_ignored(tmp_path, before, after, message):
+    with pytest.raises(ConfigError, match=message):
+        load_config(write(tmp_path, BASE.replace(before, after)))
+
+
 def test_dates_must_be_in_order(tmp_path):
     text = BASE.replace('latest_departure = "2027-03-10"', 'latest_departure = "2027-02-01"')
     with pytest.raises(ConfigError, match="before"):
@@ -239,6 +250,31 @@ def test_all_failures_warn_once_a_day(cfg, sent, monkeypatch):
     scan.run_scan(cfg, store, today=date(2027, 1, 1))
     scan.run_scan(cfg, store, today=date(2027, 1, 1))
     assert len(sent) == 1 and "failed" in sent[0][0]["title"]
+
+
+def test_expired_destination_does_not_hide_failures(tmp_path, sent, monkeypatch):
+    monkeypatch.setenv("FLIGHTWATCH_DISCORD_WEBHOOK", "https://discord.com/api/webhooks/1/x")
+    text = BASE.replace("NRT = { max_price = 1800,", 'NRT = { max_price = 1800, latest_departure = "2027-01-01",'
+                        ' earliest_departure = "2026-12-01",')
+    cfg = load_config(write(tmp_path, text))
+
+    def boom(*a, **k):
+        raise RuntimeError("blocked")
+
+    monkeypatch.setattr(search, "sweep_dates", boom)
+    monkeypatch.setattr(search, "configure_politeness", lambda n: None)
+    monkeypatch.setattr(scan.time, "sleep", lambda s: None)
+    results = scan.run_scan(cfg, Store(":memory:"), today=date(2027, 2, 1))
+    assert [r.error for r in results] == ["RuntimeError: blocked", scan.PAST_WINDOW]
+    assert scan.failures(results) == (results[:1], True)
+    assert len(sent) == 1 and "failed" in sent[0][0]["title"]
+
+
+def test_scan_only_rejects_unknown_codes(tmp_path, monkeypatch, capsys):
+    from flightwatch.cli import main
+    monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
+    assert main(["-c", str(write(tmp_path, BASE)), "scan", "--only", "cun"]) == 2
+    assert "CUN" in capsys.readouterr().err
 
 
 # --- discord formatting -----------------------------------------------------

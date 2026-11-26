@@ -6,6 +6,7 @@ Discord) take effect on the next run with no restart.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import tomllib
@@ -24,8 +25,32 @@ _CODE_RE = re.compile(r"^[A-Z]{3}$")
 _WEBHOOK_RE = re.compile(r"^https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+$")
 
 
+TOP_KEYS = ("origins", "currency", "trip", "destinations", "alerts", "scanner", "database")
+TRIP_KEYS = ("adults", "cabin", "max_stops", "min_layover_minutes", "max_layover_minutes", "earliest_departure",
+             "latest_departure", "latest_return", "depart_weekdays", "nights")
+ALERT_KEYS = ("realert_after_days", "min_drop_to_realert", "notify_on_errors")
+SCANNER_KEYS = ("paused", "requests_per_second", "pause_between_destinations", "detail_candidates")
+
+
 class ConfigError(ValueError):
     """The config file is missing, unreadable or has a bad value."""
+
+
+def _table(raw: object, allowed: tuple[str, ...], where: str) -> dict:
+    """A TOML table with only known keys, so a typo is an error instead of being silently ignored."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    for key in raw:
+        if key not in allowed:
+            hint = difflib.get_close_matches(key, allowed, n=1)
+            raise ConfigError(f"{where}: unknown setting {key!r}" + (f" (did you mean {hint[0]!r}?)" if hint else ""))
+    return raw
+
+
+def _bool(value: object, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where}: {value!r} must be true or false")
+    return value
 
 
 @dataclass(frozen=True)
@@ -123,6 +148,8 @@ _MISSING = object()
 
 
 def _trip(raw: dict, where: str, base: Trip | None = None) -> Trip:
+    _table(raw, TRIP_KEYS, where)
+
     def get(key, inherited):
         return raw[key] if key in raw else (inherited if base else _MISSING)
 
@@ -182,6 +209,7 @@ def _trip(raw: dict, where: str, base: Trip | None = None) -> Trip:
 
 
 def parse_config(raw: dict, path: Path | None = None) -> Config:
+    _table(raw, TOP_KEYS, "config")
     origins_raw = raw.get("origins")
     if isinstance(origins_raw, str):
         origins_raw = [origins_raw]
@@ -215,19 +243,19 @@ def parse_config(raw: dict, path: Path | None = None) -> Config:
         else:
             destinations.append(Destination(code, _price(value, where), trip))
 
-    alerts_raw = raw.get("alerts", {})
+    alerts_raw = _table(raw.get("alerts", {}), ALERT_KEYS, "[alerts]")
     alerts = Alerts(
         realert_after_days=float(alerts_raw.get("realert_after_days", Alerts.realert_after_days)),
         min_drop_to_realert=float(alerts_raw.get("min_drop_to_realert", Alerts.min_drop_to_realert)),
-        notify_on_errors=bool(alerts_raw.get("notify_on_errors", Alerts.notify_on_errors)),
+        notify_on_errors=_bool(alerts_raw.get("notify_on_errors", Alerts.notify_on_errors), "alerts.notify_on_errors"),
     )
 
-    scan_raw = raw.get("scanner", {})
+    scan_raw = _table(raw.get("scanner", {}), SCANNER_KEYS, "[scanner]")
     pause = scan_raw.get("pause_between_destinations", list(Scanner.pause_between_destinations))
     if not (isinstance(pause, list) and len(pause) == 2 and 0 <= pause[0] <= pause[1]):
         raise ConfigError("scanner.pause_between_destinations: give [min_seconds, max_seconds]")
     scanner = Scanner(
-        paused=bool(scan_raw.get("paused", False)),
+        paused=_bool(scan_raw.get("paused", False), "scanner.paused"),
         requests_per_second=_pos_int(scan_raw.get("requests_per_second", 2), "scanner.requests_per_second"),
         pause_between_destinations=(float(pause[0]), float(pause[1])),
         detail_candidates=min(10, _pos_int(scan_raw.get("detail_candidates", 5), "scanner.detail_candidates")),
