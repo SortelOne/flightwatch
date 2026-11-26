@@ -1,0 +1,51 @@
+# Flightwatch config. Edit this any time: each scan re-reads it, no restart needed.
+# Check your changes with:  flightwatch check-config
+
+# Home airports. They're searched together, so a deal from either one shows up.
+origins = ["ORD", "MDW"]
+
+currency = "USD"
+
+[trip]
+adults = 2
+cabin = "economy"          # economy, premium_economy, business, first
+max_stops = 1              # per direction: 0 = nonstop only, 1 = up to one layover
+max_layover_minutes = 180  # no layover longer than 3 hours
+
+# TODO: set your real travel window.
+# Every departure date in this range is checked, for each trip length in `nights`.
+earliest_departure = "2027-03-01"
+latest_departure   = "2027-04-30"
+nights = [6, 7, 8]
+
+# ---------------------------------------------------------------------------
+# Where you want to go:  AIRPORT CODE = max price
+# The price is the round-trip total for everyone in `adults` (both of you).
+# You get a Discord message when a fare drops to or below it.
+#
+# Add or remove lines freely. For a destination that needs different dates,
+# trip length or stops, use a table and override just those keys:
+#   NRT = { max_price = 1800, nights = [10, 12, 14], earliest_departure = "2027-05-01", latest_departure = "2027-06-15" }
+# ---------------------------------------------------------------------------
+[destinations]
+LIS = 1400
+CUN = 700
+HNL = 900
+
+[alerts]
+# After alerting on a destination, stay quiet about it unless the price drops by
+# at least this much more, or this many days pass (a "still cheap" reminder).
+min_drop_to_realert = 25
+realert_after_days = 3
+# Post a warning to Discord (at most once a day) if every search in a scan fails.
+notify_on_errors = true
+
+[scanner]
+# Be gentle with Google: slower requests are less likely to get this IP blocked.
+requests_per_second = 2
+pause_between_destinations = [5, 20]   # random seconds between destinations
+# How many outbound options to check when looking up the flight details for a deal.
+detail_candidates = 5
+
+# Where price history is kept (the installer creates this folder).
+# database = "/var/lib/flightwatch/flightwatch.db"

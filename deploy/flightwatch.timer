@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Flightwatch every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+# Spread runs out a bit so requests don't land at the same minute every day.
+RandomizedDelaySec=20min
+
+[Install]
+WantedBy=timers.target

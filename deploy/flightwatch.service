@@ -1,0 +1,30 @@
+[Unit]
+Description=Flightwatch cheap flight scan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=flightwatch
+Group=flightwatch
+Environment=FLIGHTWATCH_CONFIG=/etc/flightwatch/config.toml
+EnvironmentFile=/etc/flightwatch/flightwatch.env
+ExecStart=/opt/flightwatch/venv/bin/flightwatch scan
+# A full scan of a wide date window can take a while at a polite request rate.
+TimeoutStartSec=3h
+
+# Hardening: the service only needs network access and its own database folder.
+# If it fails with status=226/NAMESPACE in an LXC, turn on Options > Features >
+# Nesting for the container in Proxmox (or delete the Protect*/Private* lines).
+StateDirectory=flightwatch
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
