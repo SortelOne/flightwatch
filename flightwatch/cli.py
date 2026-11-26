@@ -5,11 +5,36 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from . import discord
-from .config import ConfigError, describe_trip, estimate_requests, load_config
-from .store import Store
+from .config import ConfigError, describe_trip, estimate_requests, fmt_minutes, load_config
+from .store import Store, utcnow
+
+log = logging.getLogger("flightwatch")
+
+
+def _local(when: datetime) -> str:
+    return when.astimezone().strftime("%a %b %-d %-I:%M %p")
+
+
+def schedule_text(config, now: datetime | None = None) -> str:
+    """One line on when scans happen, for `status`."""
+    from .scan import last_scan_started
+
+    store = Store(config.database)
+    try:
+        last = last_scan_started(store)
+    finally:
+        store.close()
+    every = f"every {config.scanner.scan_every_hours:g} hours"
+    if config.scanner.paused:
+        return f"Scans:  PAUSED (scanner.paused = true; normally {every})"
+    if last is None:
+        return f"Scans:  {every}. None yet, so the next timer check starts one."
+    due = last + timedelta(hours=config.scanner.scan_every_hours)
+    when = "due now" if due <= (now or utcnow()) else f"due after {_local(due)}"
+    return f"Scans:  {every}. The last one started {_local(last)}; the next is {when}."
 
 
 def _cmd_check(config, _args) -> int:
@@ -18,8 +43,8 @@ def _cmd_check(config, _args) -> int:
     print(f"Currency:     {config.currency}")
     print(f"Database:     {config.database}")
     print(f"Discord:      {'webhook set' if config.discord_webhook else 'NOT SET (alerts will only be logged)'}")
-    if config.scanner.paused:
-        print("Scanning:     PAUSED")
+    print(f"Scans:        every {config.scanner.scan_every_hours:g} hours"
+          + (" (PAUSED)" if config.scanner.paused else ""))
     print("Destinations:")
     for d in config.destinations:
         print(f"  {d.code}  max {discord.money(d.max_price, config.currency)}")
@@ -53,6 +78,8 @@ def format_status(config) -> str:
 
 
 def _cmd_status(config, _args) -> int:
+    print(schedule_text(config))
+    print()
     print(format_status(config))
     return 0
 
@@ -69,7 +96,7 @@ def _cmd_test_discord(config, _args) -> int:
 
 
 def _cmd_scan(config, args) -> int:
-    from .scan import ScanBusy, failures, run_scan, scan_lock
+    from .scan import ScanBusy, ScanNotDue, failures, run_scan, scan_lock
 
     only = {c.upper() for c in args.only} if args.only else None
     if only:
@@ -82,16 +109,29 @@ def _cmd_scan(config, args) -> int:
             store = Store(config.database)
             try:
                 results = run_scan(config, store, dry_run=args.dry_run, only=only, today=date.today(),
-                                   force=bool(only or args.dry_run))
+                                   force=bool(only or args.dry_run), ignore_interval=args.now)
             finally:
                 store.close()
     except ScanBusy:
-        logging.getLogger("flightwatch").info("another scan is already running; skipping this one")
+        log.info("another scan is already running; skipping this one")
+        return 0
+    except ScanNotDue as exc:
+        ago = fmt_minutes(max(1, int((utcnow() - exc.last).total_seconds() // 60)))
+        message = (f"Not scanning yet: the last scan started {ago} ago, and scans are at least "
+                   f"{config.scanner.scan_every_hours:g} hours apart (scanner.scan_every_hours). "
+                   f"The next one is due after {_local(exc.due)}.")
+        if sys.stderr.isatty():
+            # Someone ran this by hand: tell them why nothing happened.
+            print(f"{message}\nTo scan anyway, add --now.", file=sys.stderr)
+        else:
+            # The timer checks every 10 minutes; don't fill the journal with this.
+            log.debug(message)
+        return 0
+    if not results and config.scanner.paused:
         return 0
     errors, all_failed = failures(results)
     alerts = sum(r.alerted for r in results)
-    logging.getLogger("flightwatch").info("scan done: %d destinations, %d alerts, %d errors",
-                                          len(results), alerts, len(errors))
+    log.info("scan done: %d destinations, %d alerts, %d errors", len(results), alerts, len(errors))
     return 1 if all_failed else 0
 
 
@@ -104,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     scan = sub.add_parser("scan", help="search every destination once and send alerts")
     scan.add_argument("--dry-run", action="store_true", help="search and log, but don't send to Discord")
     scan.add_argument("--only", nargs="+", metavar="CODE", help="only scan these destinations")
+    scan.add_argument("--now", action="store_true",
+                      help="scan even if the last scan started less than scanner.scan_every_hours ago")
     sub.add_parser("status", help="show prices seen so far")
     sub.add_parser("check-config", help="validate the config and show what will be searched")
     sub.add_parser("test-discord", help="send a test message to the Discord webhook")

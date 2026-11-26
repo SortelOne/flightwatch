@@ -1,11 +1,14 @@
 [Unit]
-Description=Run Flightwatch every 6 hours
+Description=Check every 10 minutes whether a Flightwatch scan is due
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=6h
+# Flightwatch decides for itself whether to scan: only when the last scan started
+# at least scanner.scan_every_hours ago (6 by default, set in config.toml). That
+# start time is saved before the first request to Google, so a crash, reboot or
+# restart can never cause an extra scan. Most of these checks just exit at once.
+OnCalendar=*:0/10
 # Spread runs out a bit so requests don't land at the same minute every day.
-RandomizedDelaySec=20min
+RandomizedDelaySec=3min
 
 [Install]
 WantedBy=timers.target

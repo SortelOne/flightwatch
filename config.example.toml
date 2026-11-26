@@ -48,6 +48,10 @@ realert_after_days = 3
 notify_on_errors = true
 
 [scanner]
+# At most one scan per this many hours (1 to 168). Counted from when the last scan
+# started, and it holds through crashes and reboots. Manual test scans count too;
+# `flightwatch scan --now` is the only way around it.
+scan_every_hours = 6
 # Set to true to stop scanning without uninstalling anything.
 paused = false
 # Be gentle with Google: slower requests are less likely to get this IP blocked.

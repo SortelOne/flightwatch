@@ -44,6 +44,8 @@ flightwatch scan --dry-run --only CUN    # one real search, logged, nothing sent
 systemctl start flightwatch.timer        # from now on it scans every 6 hours
 ```
 
+The test search counts as a scan, so the first scheduled one comes 6 hours after it.
+
 ### Setting up the Discord messages
 
 Flightwatch posts through a Discord *webhook*: a private URL that lets it post to
@@ -68,22 +70,20 @@ If it leaks, delete the webhook in Discord and make a new one.
 | What | Command |
 |---|---|
 | Add or remove a destination | edit `[destinations]` in `/etc/flightwatch/config.toml`; the next scan picks it up |
-| See prices so far | `flightwatch status` |
-| Run a scan right now | `systemctl start --no-block flightwatch.service` (without `--no-block` it waits for the whole scan) |
+| See prices so far, and when the next scan is due | `flightwatch status` |
+| Change how often it scans | set `scan_every_hours` in `[scanner]` in the config |
+| Scan right now, even if one ran recently | `flightwatch scan --now` |
 | Watch the logs | `journalctl -u flightwatch -f` |
-| When's the next scan | `systemctl list-timers flightwatch.timer` |
-| Change how often it runs | `systemctl edit flightwatch.timer` (see below; the installer overwrites the unit file itself on every update) |
 | Update Flightwatch | `git pull && ./deploy/install.sh` (keeps your config) |
 
-To scan every 3 hours instead of 6, run `systemctl edit flightwatch.timer` and add
-this to the override it opens. The empty line clears the old interval, which
-otherwise stays as a second one:
+### How the schedule works
 
-```ini
-[Timer]
-OnUnitActiveSec=
-OnUnitActiveSec=3h
-```
+The timer runs `flightwatch scan` every 10 minutes, but Flightwatch only scans if
+the last scan *started* at least `scan_every_hours` ago (6 by default). Most of
+those checks just exit at once. The start time is saved in the database before the
+first request to Google, so a crash, a reboot, a restart or a re-install can never
+cause an extra scan. That includes scans you run by hand: `--dry-run` and `--only`
+tests count too, and only `--now` skips the wait.
 
 ## The config
 
@@ -106,7 +106,8 @@ CUN = 700
 NRT = { max_price = 1800, depart_weekdays = ["fri"], nights = [9] }   # override anything per destination
 
 [scanner]
-paused = false    # true = stop scanning for now
+scan_every_hours = 6   # at most one scan per 6 hours
+paused = false         # true = stop scanning for now
 ```
 
 For any day of the week, set `depart_weekdays = []` and list the trip lengths you'd
@@ -123,7 +124,7 @@ the total. Thursday-to-Tuesday trips from March to June are 17 dates, so 3
 destinations come to about 69 page loads per scan. "Any day, 5–7 nights" over the
 same months would be about 1,000. Flightwatch spaces them out (2 per second by default, with pauses
 between destinations). If Google starts blocking you, shrink the date window, use
-fewer trip lengths, or scan less often.
+fewer trip lengths, or raise `scan_every_hours`.
 
 ## If searches start failing
 
@@ -132,7 +133,7 @@ Discord warning a day while every search is failing. To fix it, update fli:
 
 ```bash
 /opt/flightwatch/venv/bin/pip install -U flights
-flightwatch scan --dry-run --only CUN
+flightwatch scan --dry-run --only CUN --now
 ```
 
 If that fixes it, bump the `flights==` pin in `pyproject.toml` to the version that

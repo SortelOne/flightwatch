@@ -18,10 +18,37 @@ from .store import SentAlert, Store, utcnow
 log = logging.getLogger(__name__)
 
 ERROR_NOTICE_EVERY = timedelta(hours=24)
+LAST_SCAN_KEY = "last_scan_started"
 
 
 class ScanBusy(RuntimeError):
     """Another scan (the timer, or a Discord /scan) is already running."""
+
+
+class ScanNotDue(RuntimeError):
+    """The last scan started less than scanner.scan_every_hours ago."""
+
+    def __init__(self, last: datetime, due: datetime):
+        super().__init__(f"the next scan is due at {due.isoformat()}")
+        self.last = last
+        self.due = due
+
+
+def last_scan_started(store: Store) -> datetime | None:
+    """When the last scan that contacted Google started.
+
+    It's saved before the first request, so a scan that crashes or is killed halfway
+    still counts. Databases from before it was saved fall back to the newest price
+    row, which is stamped with the start of the scan that found it.
+    """
+    saved = store.get_meta(LAST_SCAN_KEY)
+    return datetime.fromisoformat(saved) if saved else store.last_price_scan()
+
+
+def next_scan_due(config: Config, store: Store) -> datetime | None:
+    """When the next scan may start, or None if there has never been one."""
+    last = last_scan_started(store)
+    return None if last is None else last + timedelta(hours=config.scanner.scan_every_hours)
 
 
 @contextmanager
@@ -134,10 +161,33 @@ def scan_destination(config: Config, store: Store, dest: Destination, *, dry_run
 
 
 def run_scan(config: Config, store: Store, *, dry_run: bool = False, only: set[str] | None = None,
-             today: date | None = None, force: bool = False) -> list[DestinationResult]:
+             today: date | None = None, force: bool = False, ignore_interval: bool = False,
+             now: datetime | None = None) -> list[DestinationResult]:
+    """Scan every destination, at most once per scanner.scan_every_hours.
+
+    `force` scans even when paused; `ignore_interval` scans even if the last scan was
+    recent. Raises ScanNotDue when it's too soon.
+    """
     if config.scanner.paused and not force:
-        log.info("scanning is paused (scanner.paused = true); nothing to do")
+        log.debug("scanning is paused (scanner.paused = true); nothing to do")
         return []
+    now = now or utcnow()
+    if not ignore_interval:
+        last = last_scan_started(store)
+        if last is not None and last > now:
+            # The clock went backwards. Wait one full interval from now instead of
+            # until the clock catches up with a time that could be far away.
+            log.warning("the last scan's start time %s is in the future; waiting %g hours from now",
+                        last.isoformat(), config.scanner.scan_every_hours)
+            store.set_meta(LAST_SCAN_KEY, now.isoformat())
+            last = now
+        if last is not None:
+            due = last + timedelta(hours=config.scanner.scan_every_hours)
+            if now < due:
+                raise ScanNotDue(last, due)
+    # Saved before the first request, so a scan that crashes or is killed still counts.
+    store.set_meta(LAST_SCAN_KEY, now.isoformat())
+
     search.configure_politeness(config.scanner.requests_per_second)
     destinations = [d for d in config.destinations if not only or d.code in only]
     results = []

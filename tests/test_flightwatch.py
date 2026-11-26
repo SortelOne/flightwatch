@@ -248,8 +248,113 @@ def test_all_failures_warn_once_a_day(cfg, sent, monkeypatch):
     monkeypatch.setattr(scan.time, "sleep", lambda s: None)
     store = Store(":memory:")
     scan.run_scan(cfg, store, today=date(2027, 1, 1))
-    scan.run_scan(cfg, store, today=date(2027, 1, 1))
+    scan.run_scan(cfg, store, today=date(2027, 1, 1), ignore_interval=True)
     assert len(sent) == 1 and "failed" in sent[0][0]["title"]
+
+
+# --- at most one scan per scan_every_hours --------------------------------------
+
+@pytest.fixture
+def searches(monkeypatch):
+    """Count scans that reached the search layer (one entry per destination searched)."""
+    calls = []
+    monkeypatch.setattr(search, "sweep_dates", lambda c, d, today=None: calls.append(d.code) or [])
+    monkeypatch.setattr(search, "configure_politeness", lambda n: None)
+    monkeypatch.setattr(scan.time, "sleep", lambda s: None)
+    return calls
+
+
+def test_scans_are_at_least_six_hours_apart(cfg, searches):
+    store = Store(":memory:")
+    today = date(2027, 1, 1)
+    scan.run_scan(cfg, store, today=today, now=NOW)
+    assert searches == ["LIS", "NRT"]
+    with pytest.raises(scan.ScanNotDue) as exc:
+        scan.run_scan(cfg, store, today=today, now=NOW + timedelta(hours=5, minutes=59))
+    assert exc.value.last == NOW and exc.value.due == NOW + timedelta(hours=6)
+    # Manual tests count too: --dry-run and --only don't skip the wait.
+    with pytest.raises(scan.ScanNotDue):
+        scan.run_scan(cfg, store, today=today, now=NOW + timedelta(hours=1), dry_run=True, only={"LIS"},
+                      force=True)
+    assert searches == ["LIS", "NRT"]
+    scan.run_scan(cfg, store, today=today, now=NOW + timedelta(hours=6))
+    assert searches == ["LIS", "NRT"] * 2
+    # --now does skip it.
+    scan.run_scan(cfg, store, today=today, now=NOW + timedelta(hours=6, minutes=1), ignore_interval=True)
+    assert len(searches) == 6
+
+
+def test_a_crashed_scan_still_counts(cfg, monkeypatch, tmp_path):
+    class Killed(BaseException):
+        pass
+
+    def die(*a, **k):
+        raise Killed()
+
+    monkeypatch.setattr(search, "sweep_dates", die)
+    monkeypatch.setattr(search, "configure_politeness", lambda n: None)
+    db = tmp_path / "fw.db"
+    store = Store(db)
+    with pytest.raises(Killed):
+        scan.run_scan(cfg, store, today=date(2027, 1, 1), now=NOW)
+    store.close()  # the process is gone; a new one opens the database again
+    monkeypatch.setattr(search, "sweep_dates", lambda *a, **k: pytest.fail("must not search again yet"))
+    with pytest.raises(scan.ScanNotDue):
+        scan.run_scan(cfg, Store(db), today=date(2027, 1, 1), now=NOW + timedelta(minutes=10))
+
+
+def test_databases_from_before_this_use_the_newest_price(cfg, searches):
+    store = Store(":memory:")
+    store.record_prices("LIS", [(date(2027, 3, 1), date(2027, 3, 8), 1300.0)], "USD", NOW - timedelta(hours=2))
+    with pytest.raises(scan.ScanNotDue) as exc:
+        scan.run_scan(cfg, store, today=date(2027, 1, 1), now=NOW)
+    assert exc.value.last == NOW - timedelta(hours=2) and searches == []
+
+
+def test_clock_going_backwards_waits_one_interval_not_forever(cfg, searches):
+    store = Store(":memory:")
+    store.set_meta(scan.LAST_SCAN_KEY, (NOW + timedelta(days=30)).isoformat())
+    with pytest.raises(scan.ScanNotDue) as exc:
+        scan.run_scan(cfg, store, today=date(2027, 1, 1), now=NOW)
+    assert exc.value.due == NOW + timedelta(hours=6)
+    scan.run_scan(cfg, store, today=date(2027, 1, 1), now=NOW + timedelta(hours=6))
+    assert searches == ["LIS", "NRT"]
+
+
+def test_paused_scans_are_not_recorded(cfg, searches):
+    from dataclasses import replace
+    store = Store(":memory:")
+    assert scan.run_scan(replace(cfg, scanner=replace(cfg.scanner, paused=True)), store, now=NOW) == []
+    assert scan.last_scan_started(store) is None
+
+
+@pytest.mark.parametrize("value, ok", [(None, 6.0), (3, 3.0), (1.5, 1.5), (0.5, False), (200, False), ('"6"', False)])
+def test_scan_every_hours_setting(tmp_path, monkeypatch, value, ok):
+    monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
+    text = BASE if value is None else BASE.replace("[destinations]", f"[scanner]\nscan_every_hours = {value}\n[destinations]")
+    if ok is False:
+        with pytest.raises(ConfigError, match="scan_every_hours"):
+            load_config(write(tmp_path, text))
+    else:
+        assert load_config(write(tmp_path, text)).scanner.scan_every_hours == ok
+
+
+def test_cli_scan_waits_and_status_says_when(tmp_path, monkeypatch, searches, capsys):
+    from flightwatch import cli
+    monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
+    monkeypatch.setenv("FLIGHTWATCH_DB", str(tmp_path / "fw.db"))
+    path = str(write(tmp_path, BASE))
+    assert cli.main(["-c", path, "status"]) == 0
+    assert "None yet" in capsys.readouterr().out
+    assert cli.main(["-c", path, "scan", "--dry-run"]) == 0
+    assert len(searches) == 2
+    assert cli.main(["-c", path, "scan"]) == 0  # the timer's next check: too soon, nothing searched
+    assert cli.main(["-c", path, "scan", "--dry-run", "--only", "LIS"]) == 0
+    assert len(searches) == 2
+    assert cli.main(["-c", path, "status"]) == 0
+    assert "the next is due after" in capsys.readouterr().out
+    assert cli.main(["-c", path, "scan", "--now", "--dry-run", "--only", "LIS"]) == 0
+    assert len(searches) == 3
 
 
 def test_expired_destination_does_not_hide_failures(tmp_path, sent, monkeypatch):

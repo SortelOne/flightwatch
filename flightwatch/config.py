@@ -29,7 +29,8 @@ TOP_KEYS = ("origins", "currency", "trip", "destinations", "alerts", "scanner", 
 TRIP_KEYS = ("adults", "cabin", "max_stops", "min_layover_minutes", "max_layover_minutes", "earliest_departure",
              "latest_departure", "latest_return", "depart_weekdays", "nights")
 ALERT_KEYS = ("realert_after_days", "min_drop_to_realert", "notify_on_errors")
-SCANNER_KEYS = ("paused", "requests_per_second", "pause_between_destinations", "detail_candidates")
+SCANNER_KEYS = ("paused", "scan_every_hours", "requests_per_second", "pause_between_destinations",
+                "detail_candidates")
 
 
 class ConfigError(ValueError):
@@ -84,6 +85,7 @@ class Alerts:
 @dataclass(frozen=True)
 class Scanner:
     paused: bool = False
+    scan_every_hours: float = 6
     requests_per_second: int = 2
     pause_between_destinations: tuple[float, float] = (5, 20)
     detail_candidates: int = 5
@@ -254,8 +256,12 @@ def parse_config(raw: dict, path: Path | None = None) -> Config:
     pause = scan_raw.get("pause_between_destinations", list(Scanner.pause_between_destinations))
     if not (isinstance(pause, list) and len(pause) == 2 and 0 <= pause[0] <= pause[1]):
         raise ConfigError("scanner.pause_between_destinations: give [min_seconds, max_seconds]")
+    every = scan_raw.get("scan_every_hours", Scanner.scan_every_hours)
+    if isinstance(every, bool) or not isinstance(every, (int, float)) or not 1 <= every <= 168:
+        raise ConfigError(f"scanner.scan_every_hours: {every!r} must be a number of hours from 1 to 168")
     scanner = Scanner(
         paused=_bool(scan_raw.get("paused", False), "scanner.paused"),
+        scan_every_hours=float(every),
         requests_per_second=_pos_int(scan_raw.get("requests_per_second", 2), "scanner.requests_per_second"),
         pause_between_destinations=(float(pause[0]), float(pause[1])),
         detail_candidates=min(10, _pos_int(scan_raw.get("detail_candidates", 5), "scanner.detail_candidates")),

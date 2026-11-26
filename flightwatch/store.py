@@ -116,6 +116,11 @@ class Store:
                 (key, value),
             )
 
+    def last_price_scan(self) -> datetime | None:
+        """Start time of the newest scan that recorded any prices, for any destination."""
+        row = self.db.execute("SELECT MAX(scanned_at) FROM prices").fetchone()
+        return datetime.fromisoformat(row[0]) if row[0] else None
+
     def stats(self, destination: str) -> DestinationStats:
         low = self.db.execute(
             "SELECT price, depart_date, return_date FROM prices WHERE destination = ?"

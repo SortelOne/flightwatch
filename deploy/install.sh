@@ -57,6 +57,9 @@ install -m 644 "$REPO_DIR/deploy/flightwatch.service" /etc/systemd/system/flight
 install -m 644 "$REPO_DIR/deploy/flightwatch.timer" /etc/systemd/system/flightwatch.timer
 systemctl daemon-reload
 systemctl enable flightwatch.timer >/dev/null
+# If the timer is already running, restart it so it picks up the new schedule.
+# Safe: a timer check never scans before scanner.scan_every_hours has passed.
+systemctl try-restart flightwatch.timer
 
 cat <<MSG
 
@@ -66,7 +69,7 @@ Installed. Next steps:
   3. flightwatch check-config
   4. flightwatch test-discord
   5. flightwatch scan --dry-run --only CUN    # one real search, nothing sent to Discord
-  6. systemctl start flightwatch.timer        # then it scans every 6 hours
+  6. systemctl start flightwatch.timer        # then it scans every 6 hours (counting from step 5)
 
 Logs: journalctl -u flightwatch -f      Prices so far: flightwatch status
 MSG
