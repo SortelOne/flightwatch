@@ -1,7 +1,9 @@
 # Flightwatch config. Edit this any time: each scan re-reads it, no restart needed.
 # Check your changes with:  flightwatch check-config
 
-# Home airports. They're searched together, so a deal from either one shows up.
+# Your home airport(s): the 3-letter codes you fly out of. Replace these with yours.
+# They're searched together, so a deal from any of them shows up. One is fine too:
+#   origins = ["DEN"]
 origins = ["ORD", "MDW"]
 
 currency = "USD"

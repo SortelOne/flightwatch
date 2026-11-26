@@ -4,7 +4,7 @@ Watches Google Flights for cheap round trips from your home airports to a list o
 destinations, and sends a Discord message when a fare drops under your price.
 
 - Searches every matching departure date in your travel window, e.g. every Thursday-to-Tuesday trip from March to June
-- Searches both home airports in one query (ORD and MDW by default)
+- Searches all your home airports in one query, e.g. both ORD and MDW if you live in Chicago (set `origins` in the config)
 - Respects your limits: travelers, cabin, max stops, and shortest/longest layover
 - Keeps price history in SQLite, so alerts can show the lowest price seen before
 - Doesn't repeat itself: re-alerts only if the price drops further, or after a few days
@@ -16,7 +16,7 @@ Dates    Thu Mar 4 → Tue Mar 9, 2027 (5 nights)
 Price    $1,280 round trip for 2 (about $640 each)
          Your target: $1,400 · Lowest seen before: $1,310
 Outbound ORD Thu Mar 4 7:05 AM → LIS Fri Mar 5 3:00 AM
-         DL 1234, TP 208 · 1 stop · 15h 00m
+         DL 1234, TP 208 · 1 stop · 13h 55m
          Layover in JFK: 1h 40m
 Return   ...
 ```
@@ -88,7 +88,7 @@ OnUnitActiveSec=3h
 ## The config
 
 ```toml
-origins = ["ORD", "MDW"]
+origins = ["ORD", "MDW"]           # your home airport(s), searched together
 
 [trip]
 adults = 2
