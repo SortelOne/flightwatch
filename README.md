@@ -3,9 +3,9 @@
 Watches Google Flights for cheap round trips from your home airports to a list of
 destinations, and sends a Discord message when a fare drops under your price.
 
-- Searches every departure date in your travel window, for each trip length you list
+- Searches every matching departure date in your travel window, e.g. every Thursday-to-Tuesday trip from March to June
 - Searches both home airports in one query (ORD and MDW by default)
-- Respects your limits: travelers, cabin, max stops, and max layover length
+- Respects your limits: travelers, cabin, max stops, and shortest/longest layover
 - Keeps price history in SQLite, so alerts can show the lowest price seen before
 - Doesn't repeat itself: re-alerts only if the price drops further, or after a few days
 - No API keys and no AI model. It uses [fli](https://github.com/punitarani/fli), which reads Google Flights directly
@@ -44,8 +44,24 @@ flightwatch scan --dry-run --only CUN    # one real search, logged, nothing sent
 systemctl start flightwatch.timer        # from now on it scans every 6 hours
 ```
 
-To make a Discord webhook: Server Settings → Integrations → Webhooks → New
-Webhook → pick a channel → Copy Webhook URL.
+### Setting up the Discord messages
+
+Flightwatch posts through a Discord *webhook*: a private URL that lets it post to
+one channel. It's free, and you don't need a bot or a Discord developer account.
+
+1. In Discord, pick (or create) the channel where alerts should go, e.g. `#flight-deals`.
+   You need the Manage Webhooks permission, which you have on your own server.
+2. Channel settings (the gear next to the channel name) → **Integrations** →
+   **Webhooks** → **New Webhook**. Name it "Flightwatch" if you like.
+3. Click **Copy Webhook URL**.
+4. On the LXC, put it in `/etc/flightwatch/flightwatch.env`:
+   ```
+   FLIGHTWATCH_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
+   ```
+5. Run `flightwatch test-discord`. A "Flightwatch is connected" message should appear.
+
+Treat the webhook URL like a password: anyone who has it can post in that channel.
+If it leaks, delete the webhook in Discord and make a new one.
 
 ## Day to day
 
@@ -67,16 +83,25 @@ origins = ["ORD", "MDW"]
 [trip]
 adults = 2
 max_stops = 1
-max_layover_minutes = 180
+min_layover_minutes = 90           # no layover shorter than 1h 30m
+max_layover_minutes = 360          # or longer than 6 hours
 earliest_departure = "2027-03-01"
-latest_departure   = "2027-04-30"
-nights = [6, 7, 8]
+latest_return      = "2027-06-30"  # be home by this date
+depart_weekdays = ["thu"]          # leave on a Thursday...
+nights = [5]                       # ...for 5 nights, so home on Tuesday
 
 [destinations]
 LIS = 1400        # round-trip total for both travelers
 CUN = 700
-NRT = { max_price = 1800, nights = [10, 14] }   # override anything per destination
+NRT = { max_price = 1800, depart_weekdays = ["fri"], nights = [9] }   # override anything per destination
+
+[scanner]
+paused = false    # true = stop scanning for now
 ```
+
+For any day of the week, set `depart_weekdays = []` and list the trip lengths you'd
+take, e.g. `nights = [5, 6, 7]`. Then run `flightwatch check-config`: it spells out
+in plain English what will be searched, so you can catch mistakes.
 
 The prices are what Google Flights shows for the whole party. The first time you
 get an alert, open its link and check the total matches what you expect.
@@ -84,8 +109,9 @@ get an alert, open its link and check the total matches what you expect.
 ## How many searches is that?
 
 Each departure date × trip length is one Google page load. `check-config` prints
-the total: for example, 3 destinations × 61 dates × 3 trip lengths ≈ 550 page
-loads per scan. Flightwatch spaces them out (2 per second by default, with pauses
+the total. Thursday-to-Tuesday trips from March to June are 17 dates, so 3
+destinations come to about 69 page loads per scan. "Any day, 5–7 nights" over the
+same months would be about 1,000. Flightwatch spaces them out (2 per second by default, with pauses
 between destinations). If Google starts blocking you, shrink the date window, use
 fewer trip lengths, or scan less often.
 

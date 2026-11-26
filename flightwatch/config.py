@@ -1,7 +1,7 @@
 """Load and validate config.toml.
 
-The config is re-read at the start of every scan, so editing the destination
-list takes effect on the next run with no restart.
+The config is re-read at the start of every scan, so edits (by hand or from
+Discord) take effect on the next run with no restart.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ DEFAULT_DB_PATH = "/var/lib/flightwatch/flightwatch.db"
 WEBHOOK_ENV = "FLIGHTWATCH_DISCORD_WEBHOOK"
 
 CABINS = ("economy", "premium_economy", "business", "first")
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _CODE_RE = re.compile(r"^[A-Z]{3}$")
 _WEBHOOK_RE = re.compile(r"^https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+$")
 
@@ -31,9 +33,12 @@ class Trip:
     adults: int
     cabin: str
     max_stops: int
+    min_layover_minutes: int | None
     max_layover_minutes: int | None
     earliest_departure: date
-    latest_departure: date
+    latest_departure: date | None
+    latest_return: date | None
+    depart_weekdays: tuple[int, ...]  # 0 = Monday; empty = any day
     nights: tuple[int, ...]
 
 
@@ -53,6 +58,7 @@ class Alerts:
 
 @dataclass(frozen=True)
 class Scanner:
+    paused: bool = False
     requests_per_second: int = 2
     pause_between_destinations: tuple[float, float] = (5, 20)
     detail_candidates: int = 5
@@ -66,14 +72,15 @@ class Config:
     alerts: Alerts
     scanner: Scanner
     database: Path
+    path: Path | None = None
     discord_webhook: str | None = field(default=None, repr=False)
+    trip: Trip | None = None  # the shared [trip] settings, before per-destination overrides
 
 
-def _code(value: object, where: str) -> str:
+def airport_code(value: object, where: str = "airport") -> str:
     if not isinstance(value, str) or not _CODE_RE.match(value.strip().upper()):
         raise ConfigError(f"{where}: {value!r} is not a 3-letter airport code")
     code = value.strip().upper()
-    # Imported lazily so `check-config` errors stay readable if fli is missing.
     from fli.models import Airport
 
     if code not in Airport.__members__:
@@ -81,12 +88,20 @@ def _code(value: object, where: str) -> str:
     return code
 
 
+def weekday(value: object, where: str = "weekday") -> int:
+    if isinstance(value, str):
+        key = value.strip().lower()[:3]
+        if key in WEEKDAYS and WEEKDAY_NAMES[WEEKDAYS.index(key)].lower().startswith(value.strip().lower()):
+            return WEEKDAYS.index(key)
+    raise ConfigError(f"{where}: {value!r} is not a day of the week (use mon, tue, wed, thu, fri, sat, sun)")
+
+
 def _date(value: object, where: str) -> date:
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         try:
-            return date.fromisoformat(value)
+            return date.fromisoformat(value.strip())
         except ValueError:
             pass
     raise ConfigError(f"{where}: {value!r} is not a date like 2027-03-15")
@@ -104,59 +119,75 @@ def _price(value: object, where: str) -> float:
     return float(value)
 
 
-def _trip(raw: dict, where: str, base: Trip | None = None) -> Trip:
-    def get(key, default):
-        return raw[key] if key in raw else default
+_MISSING = object()
 
-    adults = _pos_int(get("adults", base.adults if base else 1), f"{where}.adults")
+
+def _trip(raw: dict, where: str, base: Trip | None = None) -> Trip:
+    def get(key, inherited):
+        return raw[key] if key in raw else (inherited if base else _MISSING)
+
+    def opt_int(key, inherited):
+        v = get(key, inherited)
+        return None if v in (_MISSING, None, 0) else _pos_int(v, f"{where}.{key}")
+
+    adults = _pos_int(raw.get("adults", base.adults if base else 1), f"{where}.adults")
     if adults > 9:
         raise ConfigError(f"{where}.adults: Google Flights allows at most 9 travelers")
 
-    cabin = str(get("cabin", base.cabin if base else "economy")).lower()
+    cabin = str(raw.get("cabin", base.cabin if base else "economy")).lower()
     if cabin not in CABINS:
         raise ConfigError(f"{where}.cabin: must be one of {', '.join(CABINS)}")
 
-    max_stops = _pos_int(get("max_stops", base.max_stops if base else 1), f"{where}.max_stops", allow_zero=True)
+    max_stops = _pos_int(raw.get("max_stops", base.max_stops if base else 1), f"{where}.max_stops", allow_zero=True)
     if max_stops > 2:
         raise ConfigError(f"{where}.max_stops: must be 0, 1 or 2")
 
-    layover = get("max_layover_minutes", base.max_layover_minutes if base else None)
-    if layover is not None:
-        layover = _pos_int(layover, f"{where}.max_layover_minutes")
+    min_lay = opt_int("min_layover_minutes", base.min_layover_minutes if base else None)
+    max_lay = opt_int("max_layover_minutes", base.max_layover_minutes if base else None)
+    if min_lay and max_lay and min_lay > max_lay:
+        raise ConfigError(f"{where}: min_layover_minutes is longer than max_layover_minutes")
 
-    if base is None and ("earliest_departure" not in raw or "latest_departure" not in raw):
-        raise ConfigError(f"{where}: earliest_departure and latest_departure are required")
-    earliest = _date(get("earliest_departure", base.earliest_departure if base else None), f"{where}.earliest_departure")
-    latest = _date(get("latest_departure", base.latest_departure if base else None), f"{where}.latest_departure")
-    if latest < earliest:
+    earliest = get("earliest_departure", base.earliest_departure if base else None)
+    if earliest is _MISSING:
+        raise ConfigError(f"{where}.earliest_departure is required")
+    earliest = _date(earliest, f"{where}.earliest_departure")
+
+    latest_dep = get("latest_departure", base.latest_departure if base else None)
+    latest_dep = None if latest_dep in (_MISSING, None) else _date(latest_dep, f"{where}.latest_departure")
+    latest_ret = get("latest_return", base.latest_return if base else None)
+    latest_ret = None if latest_ret in (_MISSING, None) else _date(latest_ret, f"{where}.latest_return")
+    if latest_dep is None and latest_ret is None:
+        raise ConfigError(f"{where}: set latest_return (when you need to be home) or latest_departure")
+    if latest_dep and latest_dep < earliest:
         raise ConfigError(f"{where}: latest_departure is before earliest_departure")
+    if latest_ret and latest_ret <= earliest:
+        raise ConfigError(f"{where}: latest_return must be after earliest_departure")
 
-    nights_raw = get("nights", list(base.nights) if base else None)
+    days_raw = raw.get("depart_weekdays", list(WEEKDAYS[d] for d in base.depart_weekdays) if base else [])
+    if isinstance(days_raw, str):
+        days_raw = [days_raw]
+    if not isinstance(days_raw, list):
+        raise ConfigError(f'{where}.depart_weekdays: give a list like ["thu"], or [] for any day')
+    depart_weekdays = tuple(sorted({weekday(d, f"{where}.depart_weekdays") for d in days_raw}))
+
+    nights_raw = raw.get("nights", list(base.nights) if base else None)
     if isinstance(nights_raw, int):
         nights_raw = [nights_raw]
     if not isinstance(nights_raw, list) or not nights_raw:
         raise ConfigError(f"{where}.nights: give a list of trip lengths, like [6, 7, 8]")
     nights = tuple(sorted({_pos_int(n, f"{where}.nights") for n in nights_raw}))
 
-    return Trip(adults, cabin, max_stops, layover, earliest, latest, nights)
+    return Trip(adults, cabin, max_stops, min_lay, max_lay, earliest, latest_dep, latest_ret,
+                depart_weekdays, nights)
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
-    path = Path(path or os.environ.get("FLIGHTWATCH_CONFIG", DEFAULT_CONFIG_PATH))
-    try:
-        with open(path, "rb") as fh:
-            raw = tomllib.load(fh)
-    except FileNotFoundError:
-        raise ConfigError(f"config file not found: {path}") from None
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path} is not valid TOML: {exc}") from None
-
+def parse_config(raw: dict, path: Path | None = None) -> Config:
     origins_raw = raw.get("origins")
     if isinstance(origins_raw, str):
         origins_raw = [origins_raw]
     if not isinstance(origins_raw, list) or not origins_raw:
         raise ConfigError('origins: list your home airports, like origins = ["ORD", "MDW"]')
-    origins = tuple(dict.fromkeys(_code(o, "origins") for o in origins_raw))
+    origins = tuple(dict.fromkeys(airport_code(o, "origins") for o in origins_raw))
 
     currency = str(raw.get("currency", "USD")).upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
@@ -168,11 +199,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     trip = _trip(trip_raw, "trip")
 
     dest_raw = raw.get("destinations")
-    if not isinstance(dest_raw, dict) or not dest_raw:
-        raise ConfigError("[destinations] is empty: add lines like LIS = 1400")
+    if not isinstance(dest_raw, dict):
+        raise ConfigError("[destinations] section is missing")
     destinations = []
     for key, value in dest_raw.items():
-        code = _code(key, f"destinations.{key}")
+        code = airport_code(key, f"destinations.{key}")
         if code in origins:
             raise ConfigError(f"destinations.{code}: that is one of your origins")
         where = f"destinations.{code}"
@@ -196,6 +227,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     if not (isinstance(pause, list) and len(pause) == 2 and 0 <= pause[0] <= pause[1]):
         raise ConfigError("scanner.pause_between_destinations: give [min_seconds, max_seconds]")
     scanner = Scanner(
+        paused=bool(scan_raw.get("paused", False)),
         requests_per_second=_pos_int(scan_raw.get("requests_per_second", 2), "scanner.requests_per_second"),
         pause_between_destinations=(float(pause[0]), float(pause[1])),
         detail_candidates=min(10, _pos_int(scan_raw.get("detail_candidates", 5), "scanner.detail_candidates")),
@@ -207,19 +239,80 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     if webhook and not _WEBHOOK_RE.match(webhook):
         raise ConfigError(f"{WEBHOOK_ENV} does not look like a Discord webhook URL")
 
-    return Config(origins, currency, tuple(destinations), alerts, scanner, database, webhook)
+    return Config(origins, currency, tuple(destinations), alerts, scanner, database, path, webhook, trip)
 
 
-def departure_dates(trip: Trip, today: date | None = None) -> list[date]:
-    """Departure dates still worth searching: tomorrow onward, inside the window."""
+def config_path(path: str | os.PathLike | None = None) -> Path:
+    return Path(path or os.environ.get("FLIGHTWATCH_CONFIG", DEFAULT_CONFIG_PATH))
+
+
+def load_config(path: str | os.PathLike | None = None) -> Config:
+    path = config_path(path)
+    try:
+        with open(path, "rb") as fh:
+            raw = tomllib.load(fh)
+    except FileNotFoundError:
+        raise ConfigError(f"config file not found: {path}") from None
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path} is not valid TOML: {exc}") from None
+    return parse_config(raw, path)
+
+
+def search_plan(trip: Trip, today: date | None = None) -> dict[int, list[date]]:
+    """For each trip length, the departure dates still worth searching."""
     start = max(trip.earliest_departure, (today or date.today()) + timedelta(days=1))
-    return [start + timedelta(days=i) for i in range((trip.latest_departure - start).days + 1)]
+    plan: dict[int, list[date]] = {}
+    for nights in trip.nights:
+        last = trip.latest_departure or date.max
+        if trip.latest_return:
+            last = min(last, trip.latest_return - timedelta(days=nights))
+        days = [start + timedelta(days=i) for i in range(max(0, (last - start).days + 1))]
+        if trip.depart_weekdays:
+            days = [d for d in days if d.weekday() in trip.depart_weekdays]
+        plan[nights] = days
+    return plan
+
+
+def describe_trip(trip: Trip) -> str:
+    """One readable paragraph describing what gets searched."""
+    window = f"leave {trip.earliest_departure:%b %-d, %Y} or later"
+    if trip.latest_return:
+        window += f", home by {trip.latest_return:%b %-d, %Y}"
+    if trip.latest_departure:
+        window += f", leave by {trip.latest_departure:%b %-d, %Y}"
+    nights = "/".join(str(n) for n in trip.nights)
+    if trip.depart_weekdays:
+        days = " or ".join(WEEKDAY_NAMES[d] for d in trip.depart_weekdays)
+        if len(trip.depart_weekdays) == 1 and len(trip.nights) == 1:
+            back = WEEKDAY_NAMES[(trip.depart_weekdays[0] + trip.nights[0]) % 7]
+            pattern = f"{days} to {back} ({nights} nights)"
+        else:
+            pattern = f"leave on {days}, {nights} nights"
+    else:
+        pattern = f"any day, {nights} nights"
+    stops = "nonstop only" if trip.max_stops == 0 else f"up to {trip.max_stops} stop{'s' if trip.max_stops > 1 else ''}"
+    lay = []
+    if trip.min_layover_minutes:
+        lay.append(f"at least {fmt_minutes(trip.min_layover_minutes)}")
+    if trip.max_layover_minutes:
+        lay.append(f"at most {fmt_minutes(trip.max_layover_minutes)}")
+    layovers = f", layovers {' and '.join(lay)}" if lay and trip.max_stops else ""
+    travelers = f"{trip.adults} traveler{'s' if trip.adults > 1 else ''}"
+    cabin = trip.cabin.replace("_", " ")
+    return f"{window}\n{pattern}\n{travelers}, {cabin}, {stops}{layovers}"
+
+
+def fmt_minutes(minutes: int) -> str:
+    h, m = divmod(minutes, 60)
+    if not h:
+        return f"{m}m"
+    return f"{h}h" if not m else f"{h}h {m:02d}m"
 
 
 def estimate_requests(config: Config, today: date | None = None) -> int:
     """Rough count of Google page loads one full scan makes."""
     total = 0
     for dest in config.destinations:
-        total += len(departure_dates(dest.trip, today)) * len(dest.trip.nights)
+        total += sum(len(days) for days in search_plan(dest.trip, today).values())
         total += 1 + config.scanner.detail_candidates  # detail lookup if it alerts
     return total

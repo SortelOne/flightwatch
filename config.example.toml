@@ -10,13 +10,18 @@ currency = "USD"
 adults = 2
 cabin = "economy"          # economy, premium_economy, business, first
 max_stops = 1              # per direction: 0 = nonstop only, 1 = up to one layover
-max_layover_minutes = 180  # no layover longer than 3 hours
+min_layover_minutes = 90   # no layover shorter than 1h 30m (0 = no minimum)
+max_layover_minutes = 360  # no layover longer than 6 hours (0 = no maximum)
 
-# TODO: set your real travel window.
-# Every departure date in this range is checked, for each trip length in `nights`.
+# Travel window: leave on or after earliest_departure, be home by latest_return.
 earliest_departure = "2027-03-01"
-latest_departure   = "2027-04-30"
-nights = [6, 7, 8]
+latest_return      = "2027-06-30"
+
+# Which day you leave and how many nights you stay.
+# Thursday + 5 nights = home on Tuesday. That's 17 trips from March to June 2027.
+# For any day of the week, use:  depart_weekdays = []   and e.g.  nights = [5, 6, 7]
+depart_weekdays = ["thu"]  # mon, tue, wed, thu, fri, sat, sun
+nights = [5]
 
 # ---------------------------------------------------------------------------
 # Where you want to go:  AIRPORT CODE = max price
@@ -25,7 +30,7 @@ nights = [6, 7, 8]
 #
 # Add or remove lines freely. For a destination that needs different dates,
 # trip length or stops, use a table and override just those keys:
-#   NRT = { max_price = 1800, nights = [10, 12, 14], earliest_departure = "2027-05-01", latest_departure = "2027-06-15" }
+#   NRT = { max_price = 1800, depart_weekdays = ["fri"], nights = [9], earliest_departure = "2027-05-01" }
 # ---------------------------------------------------------------------------
 [destinations]
 LIS = 1400
@@ -41,6 +46,8 @@ realert_after_days = 3
 notify_on_errors = true
 
 [scanner]
+# Set to true to stop scanning without uninstalling anything.
+paused = false
 # Be gentle with Google: slower requests are less likely to get this IP blocked.
 requests_per_second = 2
 pause_between_destinations = [5, 20]   # random seconds between destinations

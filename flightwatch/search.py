@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from .config import Config, Destination, Trip, departure_dates
+from .config import Config, Destination, Trip, search_plan
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,9 @@ def _fli_filters(origins: tuple[str, ...], dest: str, trip: Trip, depart: date, 
         FlightSegment(departure_airport=there, arrival_airport=here, travel_date=ret.isoformat()),
     ]
     stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER, 2: MaxStops.TWO_OR_FEWER_STOPS}[trip.max_stops]
-    layovers = LayoverRestrictions(max_duration=trip.max_layover_minutes) if trip.max_layover_minutes else None
+    layovers = None
+    if trip.max_stops and (trip.min_layover_minutes or trip.max_layover_minutes):
+        layovers = LayoverRestrictions(min_duration=trip.min_layover_minutes, max_duration=trip.max_layover_minutes)
     return dict(
         passenger_info=PassengerInfo(adults=trip.adults),
         flight_segments=segments,
@@ -96,18 +98,27 @@ def _fli_filters(origins: tuple[str, ...], dest: str, trip: Trip, depart: date, 
     )
 
 
+def _runs(days: list[date]) -> list[list[date]]:
+    """Split dates into runs of consecutive days, each short enough for one sweep."""
+    runs: list[list[date]] = []
+    for day in days:
+        if runs and day - runs[-1][-1] == timedelta(days=1) and len(runs[-1]) < MAX_DATES_PER_SWEEP:
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+    return runs
+
+
 def sweep_dates(config: Config, dest: Destination, today: date | None = None) -> list[FareQuote]:
-    """Cheapest price for every departure date x trip length in the window."""
+    """Cheapest price for every departure date x trip length in the plan."""
     from fli.models import DateSearchFilters, TripType
     from fli.search import SearchDates
 
-    days = departure_dates(dest.trip, today)
     quotes: list[FareQuote] = []
     errors: list[Exception] = []
-    for nights in dest.trip.nights:
-        for i in range(0, len(days), MAX_DATES_PER_SWEEP):
-            chunk = days[i : i + MAX_DATES_PER_SWEEP]
-            first, last = chunk[0], chunk[-1]
+    for nights, days in search_plan(dest.trip, today).items():
+        for run in _runs(days):
+            first, last = run[0], run[-1]
             filters = DateSearchFilters(
                 trip_type=TripType.ROUND_TRIP,
                 from_date=first.isoformat(),
@@ -118,17 +129,17 @@ def sweep_dates(config: Config, dest: Destination, today: date | None = None) ->
             try:
                 results = SearchDates().search(filters, currency=config.currency) or []
             except Exception as exc:  # noqa: BLE001
-                if not quotes:
-                    # Nothing has worked yet, so Google is likely unreachable or blocking us.
-                    # Stop here instead of retrying every other date range for this destination.
+                if not quotes and not errors:
+                    # The very first search failed, so Google is likely unreachable or blocking
+                    # us. Stop here instead of retrying every other date for this destination.
                     raise
                 log.warning("%s, %d nights, %s..%s failed: %s", dest.code, nights, first, last, exc)
                 errors.append(exc)
                 continue
             for r in results:
                 dep = r.date[0].date()
-                quotes.append(FareQuote(dep, r.date[1].date() if len(r.date) > 1 else dep + timedelta(days=nights),
-                                        float(r.price)))
+                ret = r.date[1].date() if len(r.date) > 1 else dep + timedelta(days=nights)
+                quotes.append(FareQuote(dep, ret, float(r.price)))
     if not quotes and errors:
         raise errors[-1]
     return quotes
@@ -160,6 +171,8 @@ def fits(direction: Direction, trip: Trip) -> bool:
     if direction.stops > trip.max_stops:
         return False
     if trip.max_layover_minutes and any(m > trip.max_layover_minutes for m in direction.layover_minutes):
+        return False
+    if trip.min_layover_minutes and any(m < trip.min_layover_minutes for m in direction.layover_minutes):
         return False
     return True
 

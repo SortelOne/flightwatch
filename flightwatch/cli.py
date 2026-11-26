@@ -8,42 +8,52 @@ import sys
 from datetime import date
 
 from . import discord
-from .config import ConfigError, estimate_requests, load_config
-from .search import departure_dates
+from .config import ConfigError, describe_trip, estimate_requests, load_config
 from .store import Store
 
 
 def _cmd_check(config, _args) -> int:
+    print(f"Config:       {config.path}")
     print(f"Origins:      {', '.join(config.origins)}")
     print(f"Currency:     {config.currency}")
     print(f"Database:     {config.database}")
     print(f"Discord:      {'webhook set' if config.discord_webhook else 'NOT SET (alerts will only be logged)'}")
+    if config.scanner.paused:
+        print("Scanning:     PAUSED")
     print("Destinations:")
     for d in config.destinations:
-        t = d.trip
-        days = len(departure_dates(t))
-        print(f"  {d.code}  max {discord.money(d.max_price, config.currency)} for {t.adults}, "
-              f"leave {t.earliest_departure}..{t.latest_departure} ({days} dates left), "
-              f"nights {list(t.nights)}, <= {t.max_stops} stop(s)"
-              + (f", layovers <= {t.max_layover_minutes} min" if t.max_layover_minutes else ""))
+        print(f"  {d.code}  max {discord.money(d.max_price, config.currency)}")
+        print("        " + describe_trip(d.trip).replace("\n", "\n        "))
     print(f"About {estimate_requests(config)} Google page loads per scan.")
     return 0
 
 
-def _cmd_status(config, _args) -> int:
+def status_rows(config) -> list[tuple[str, ...]]:
+    """Destination, target, latest, lowest, lowest dates, last alert."""
     store = Store(config.database)
+    rows = []
     try:
-        print(f"{'DEST':<5} {'TARGET':>9} {'LATEST':>9} {'LOWEST':>9}  LOWEST DATES             LAST ALERT")
         for d in config.destinations:
             s = store.stats(d.code)
             a = store.last_alert(d.code)
             fmt = lambda v: discord.money(v, config.currency) if v is not None else "-"  # noqa: E731
-            dates = f"{s.lowest_ever_dates[0]} -> {s.lowest_ever_dates[1]}" if s.lowest_ever_dates else "-"
-            alert = f"{fmt(a.price)} on {a.sent_at:%Y-%m-%d}" if a else "-"
-            print(f"{d.code:<5} {fmt(d.max_price):>9} {fmt(s.latest_price):>9} {fmt(s.lowest_ever):>9}  "
-                  f"{dates:<24} {alert}")
+            dates = f"{s.lowest_ever_dates[0]:%b %-d}-{s.lowest_ever_dates[1]:%b %-d}" if s.lowest_ever_dates else "-"
+            alert = f"{fmt(a.price)} {a.sent_at:%b %-d}" if a else "-"
+            rows.append((d.code, fmt(d.max_price), fmt(s.latest_price), fmt(s.lowest_ever), dates, alert))
     finally:
         store.close()
+    return rows
+
+
+def format_status(config) -> str:
+    header = ("DEST", "TARGET", "LATEST", "LOWEST", "LOWEST DATES", "LAST ALERT")
+    rows = [header] + status_rows(config)
+    widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
+    return "\n".join("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows)
+
+
+def _cmd_status(config, _args) -> int:
+    print(format_status(config))
     return 0
 
 
@@ -59,14 +69,20 @@ def _cmd_test_discord(config, _args) -> int:
 
 
 def _cmd_scan(config, args) -> int:
-    from .scan import run_scan
+    from .scan import ScanBusy, run_scan, scan_lock
 
     only = {c.upper() for c in args.only} if args.only else None
-    store = Store(config.database)
     try:
-        results = run_scan(config, store, dry_run=args.dry_run, only=only, today=date.today())
-    finally:
-        store.close()
+        with scan_lock(config.database):
+            store = Store(config.database)
+            try:
+                results = run_scan(config, store, dry_run=args.dry_run, only=only, today=date.today(),
+                                   force=bool(only or args.dry_run))
+            finally:
+                store.close()
+    except ScanBusy:
+        logging.getLogger("flightwatch").info("another scan is already running; skipping this one")
+        return 0
     errors = [r for r in results if r.error and r.error != "travel window is in the past"]
     alerts = sum(r.alerted for r in results)
     logging.getLogger("flightwatch").info("scan done: %d destinations, %d alerts, %d errors",

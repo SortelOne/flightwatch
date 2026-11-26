@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from flightwatch import discord, scan, search
-from flightwatch.config import ConfigError, departure_dates, estimate_requests, load_config
+from flightwatch.config import ConfigError, describe_trip, estimate_requests, load_config, search_plan
 from flightwatch.store import SentAlert, Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +39,14 @@ def test_example_config_loads(monkeypatch):
     cfg = load_config(ROOT / "config.example.toml")
     assert cfg.origins == ("ORD", "MDW")
     assert [d.code for d in cfg.destinations] == ["LIS", "CUN", "HNL"]
-    assert cfg.destinations[0].trip.max_layover_minutes == 180
+    trip = cfg.destinations[0].trip
+    assert (trip.min_layover_minutes, trip.max_layover_minutes) == (90, 360)
+    # Thursdays from Mar 4 to Jun 24 2027, each returning the following Tuesday
+    days = search_plan(trip, today=date(2026, 11, 26))[5]
+    assert len(days) == 17 and days[0] == date(2027, 3, 4) and days[-1] == date(2027, 6, 24)
+    assert all(d.weekday() == 3 for d in days)
+    assert describe_trip(trip).splitlines()[1] == "Thursday to Tuesday (5 nights)"
+    assert "layovers at least 1h 30m and at most 6h" in describe_trip(trip)
 
 
 def test_overrides_and_normalising(tmp_path, monkeypatch):
@@ -78,12 +85,34 @@ def test_webhook_is_validated(tmp_path, monkeypatch):
     assert load_config(write(tmp_path, BASE)).discord_webhook.endswith("abc-DEF_9")
 
 
-def test_departure_dates_skip_the_past(tmp_path, monkeypatch):
+def test_search_plan_skips_the_past(tmp_path, monkeypatch):
     monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
     trip = load_config(write(tmp_path, BASE)).destinations[0].trip
-    assert len(departure_dates(trip, today=date(2027, 1, 1))) == 10
-    assert departure_dates(trip, today=date(2027, 3, 8)) == [date(2027, 3, 9), date(2027, 3, 10)]
-    assert departure_dates(trip, today=date(2027, 4, 1)) == []
+    assert len(search_plan(trip, today=date(2027, 1, 1))[7]) == 10
+    assert search_plan(trip, today=date(2027, 3, 8))[7] == [date(2027, 3, 9), date(2027, 3, 10)]
+    assert search_plan(trip, today=date(2027, 4, 1)) == {6: [], 7: []}
+
+
+def test_latest_return_limits_each_trip_length(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
+    text = BASE.replace('latest_departure = "2027-03-10"', 'latest_return = "2027-03-15"')
+    plan = search_plan(load_config(write(tmp_path, text)).destinations[0].trip, today=date(2027, 1, 1))
+    assert plan[6][-1] == date(2027, 3, 9) and plan[7][-1] == date(2027, 3, 8)
+
+
+def test_weekday_spellings(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLIGHTWATCH_DISCORD_WEBHOOK", raising=False)
+    text = BASE.replace("nights = [7, 6, 7]", 'nights = [5]\ndepart_weekdays = ["Thursday", "fri"]')
+    trip = load_config(write(tmp_path, text)).destinations[0].trip
+    assert trip.depart_weekdays == (3, 4)
+    with pytest.raises(ConfigError, match="day of the week"):
+        load_config(write(tmp_path, text.replace('"fri"', '"funday"')))
+
+
+def test_min_layover_cannot_exceed_max(tmp_path):
+    text = BASE.replace("max_layover_minutes = 180", "max_layover_minutes = 180\nmin_layover_minutes = 200")
+    with pytest.raises(ConfigError, match="min_layover"):
+        load_config(write(tmp_path, text))
 
 
 def test_estimate_requests(tmp_path, monkeypatch):
@@ -127,6 +156,10 @@ def test_fits(tmp_path, monkeypatch):
     assert search.fits(direction(180), trip)
     assert not search.fits(direction(181), trip)
     assert not search.fits(direction(60, 60), trip)
+    with_min = search.Trip(**{**trip.__dict__, "min_layover_minutes": 90})
+    assert not search.fits(direction(89), with_min)
+    assert search.fits(direction(90), with_min)
+    assert search.fits(direction(), with_min)  # nonstop has no layover to check
 
 
 # --- store ------------------------------------------------------------------
@@ -222,3 +255,20 @@ def test_deal_embed_reads_well():
     assert e["title"] == "✈️ ORD/MDW → LIS for $1,280"
     assert "about $640 each" in text and "Lowest seen before: $1,310" in text
     assert "DL 1234, TP 208 · 1 stop · 15h 00m" in text and "Layover in JFK: 1h 40m" in text
+
+
+def test_paused_scans_do_nothing(cfg, sent, monkeypatch):
+    from dataclasses import replace
+    paused = replace(cfg, scanner=replace(cfg.scanner, paused=True))
+    monkeypatch.setattr(search, "sweep_dates", lambda *a, **k: pytest.fail("should not search"))
+    assert scan.run_scan(paused, Store(":memory:")) == []
+
+
+def test_only_one_scan_at_a_time(tmp_path):
+    db = tmp_path / "fw.db"
+    with scan.scan_lock(db):
+        with pytest.raises(scan.ScanBusy):
+            with scan.scan_lock(db):
+                pass
+    with scan.scan_lock(db):  # released again
+        pass

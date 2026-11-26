@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from . import discord, search
 from .config import Config, Destination
@@ -15,6 +18,26 @@ from .store import SentAlert, Store, utcnow
 log = logging.getLogger(__name__)
 
 ERROR_NOTICE_EVERY = timedelta(hours=24)
+
+
+class ScanBusy(RuntimeError):
+    """Another scan (the timer, or a Discord /scan) is already running."""
+
+
+@contextmanager
+def scan_lock(database: Path):
+    """Make sure only one scan runs at a time, so Google isn't hit twice as hard."""
+    lock_path = Path(database).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ScanBusy("a scan is already running") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def should_alert(price: float, target: float, last: SentAlert | None, now: datetime,
@@ -42,7 +65,7 @@ def scan_destination(config: Config, store: Store, dest: Destination, *, dry_run
     result = DestinationResult(dest.code)
     started = utcnow()
 
-    if not search.departure_dates(dest.trip, today):
+    if not any(search.search_plan(dest.trip, today).values()):
         result.error = "travel window is in the past"
         log.info("%s: skipped, its travel window is in the past", dest.code)
         return result
@@ -96,7 +119,10 @@ def scan_destination(config: Config, store: Store, dest: Destination, *, dry_run
 
 
 def run_scan(config: Config, store: Store, *, dry_run: bool = False, only: set[str] | None = None,
-             today: date | None = None) -> list[DestinationResult]:
+             today: date | None = None, force: bool = False) -> list[DestinationResult]:
+    if config.scanner.paused and not force:
+        log.info("scanning is paused (scanner.paused = true); nothing to do")
+        return []
     search.configure_politeness(config.scanner.requests_per_second)
     destinations = [d for d in config.destinations if not only or d.code in only]
     results = []
