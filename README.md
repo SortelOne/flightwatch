@@ -12,10 +12,10 @@ destinations, and sends a Discord message when a fare drops under your price.
 
 ```
 ✈️ ORD/MDW → LIS for $1,280
-Dates    Wed Mar 3 → Wed Mar 10, 2027 (7 nights)
+Dates    Thu Mar 4 → Tue Mar 9, 2027 (5 nights)
 Price    $1,280 round trip for 2 (about $640 each)
          Your target: $1,400 · Lowest seen before: $1,310
-Outbound ORD Wed Mar 3 7:05 AM → LIS Thu Mar 4 3:00 AM
+Outbound ORD Thu Mar 4 7:05 AM → LIS Fri Mar 5 3:00 AM
          DL 1234, TP 208 · 1 stop · 15h 00m
          Layover in JFK: 1h 40m
 Return   ...
