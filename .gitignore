@@ -1,9 +1,27 @@
+# Python
 __pycache__/
+*.py[cod]
 *.egg-info/
 .venv/
 venv/
 build/
+dist/
+.pytest_cache/
+
+# Local data and secrets (never commit these)
 *.db
+*.db-journal
+flightwatch.lock
 config.toml
 flightwatch.env
-dist/
+.env
+
+# macOS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
